@@ -1,0 +1,12 @@
+# Kernel-tree style. SortIncludes off: include order is load-bearing (the kernel README's "Order-dependent placement").
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 120
+DerivePointerAlignment: false
+PointerAlignment: Left
+NamespaceIndentation: None
+SortIncludes: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortLoopsOnASingleLine: false
+AlignEscapedNewlines: Left
+Standard: Latest

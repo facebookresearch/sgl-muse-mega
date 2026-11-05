@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sgl-muse-mega"
+version = "0.1.0.dev0"
+description = "One persistent kernel per decoder layer for SGLang"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+# SGLang, torch and the CUDA toolkit come from SGLang's CUDA image
+dependencies = []
+
+# SGLang loads the package as a general plugin; --enable-nvidia-megakernel turns the
+# megakernel on
+[project.entry-points."sglang.srt.plugins"]
+nvidia_megakernel = "sgl_muse_mega.plugin:register"
+
+[tool.setuptools.packages.find]
+include = ["sgl_muse_mega*"]
+
+# the kernel and host sources ship with the package and build at load
+[tool.setuptools.package-data]
+"*" = ["*.cu", "*.cuh", "*.h", "*.md"]

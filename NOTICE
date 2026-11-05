@@ -1,0 +1,6 @@
+sgl-muse-mega
+Licensed under the MIT License.
+
+Portions are adapted from SGLang (https://github.com/sgl-project/sglang): the DFlash2
+reference (test/reference/dflash2.py) re-derives the draft math of SGLang's DFlash path
+(Apache License 2.0, Copyright SGLang Team) and names the SGLang files it follows.
