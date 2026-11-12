@@ -511,9 +511,7 @@ def model(cfg: Config, lm_head_rows: int | None = None) -> SimpleNamespace:
             _beta=meta(1, h, dtype=torch.float32),
         )
 
-    rope = SimpleNamespace(
-        cos_sin_cache=meta(cfg.context_length + 32, 64, dtype=torch.float32)
-    )
+    rope = SimpleNamespace(cos_sin_cache=meta(1048576, 64, dtype=torch.float32))
     layers = [
         SimpleNamespace(
             input_layernorm=norm(h),
@@ -553,6 +551,18 @@ def model(cfg: Config, lm_head_rows: int | None = None) -> SimpleNamespace:
         model=SimpleNamespace(language_model=lm),
         lm_head=vocab(lm_head_rows or cfg.vocab_rank),
     )
+
+
+def test_the_rope_rows_continue_past_sglangs():
+    cfg = Config()
+    n, need = 4096, 4096 + 2 * cfg.rows
+    cos, sin = executor.rope_cos_sin(torch.arange(need), cfg.head_dim, cfg.rope_theta)
+    full = torch.cat([cos, sin], 1)
+    rows = full[:n].clone()
+    assert executor.rope_table(rows, n, cfg) is rows
+    out = executor.rope_table(rows, need, cfg)
+    assert out.shape == full.shape and torch.equal(out[:n], rows)
+    torch.testing.assert_close(out, full, rtol=0, atol=1e-6)
 
 
 @pytest.mark.parametrize("tp", [4, 8])

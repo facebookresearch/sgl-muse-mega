@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 sglang = pytest.importorskip("sglang")
 
@@ -177,7 +178,6 @@ def test_the_public_config_is_served(tmp_path, monkeypatch):
         (dict(layer_rope_theta=[1e6] * 62), {}, "text_config.layer_rope_theta"),
         (dict(output_multiplier=0.2), {}, "text_config.output_multiplier"),
         ({}, dict(tp_size=8, nnodes=1), "groups of 4"),
-        ({}, dict(context_length=262144), "--context-length"),
         ({}, dict(context_length=None), "--context-length"),
         ({}, dict(watchdog_timeout=60), "--watchdog-timeout"),
         ({}, dict(load_format="dummy"), "the build reads the experts"),
@@ -187,7 +187,6 @@ def test_the_public_config_is_served(tmp_path, monkeypatch):
         "rope",
         "multiplier",
         "tp8_one_node",
-        "long_context",
         "no_context",
         "watchdog",
         "dummy",
@@ -274,6 +273,33 @@ def draft_config(**dflash) -> SimpleNamespace:
         | dflash,
     )
     return SimpleNamespace(to_dict=lambda: cfg)
+
+
+@pytest.mark.parametrize(
+    "context, refused", [(131072, False), (1048576, False), (1048577, True)]
+)
+def test_the_rope_rows_bound_the_context(monkeypatch, context, refused):
+    # SGLang's rope rows for the published checkpoint: its max_position_embeddings
+    tp = SimpleNamespace(world_size=4, rank_in_group=0, cpu_group=None)
+    monkeypatch.setattr(spec, "get_parallel", lambda: SimpleNamespace(tp_group=tp))
+    monkeypatch.setattr(spec, "alias_reasons", lambda *a: [])
+    monkeypatch.setattr(
+        spec, "rope_rows", lambda m: torch.empty(1048576, 64, device="meta")
+    )
+    monkeypatch.setattr(
+        spec, "get_model", lambda: SimpleNamespace(context_length=context)
+    )
+    monkeypatch.setattr(
+        spec.dist,
+        "all_gather_object",
+        lambda out, obj, group: out.__setitem__(slice(None), [obj] * len(out)),
+    )
+    reasons = spec.model_disable_reasons(None, None)
+    assert reasons == (
+        [f"--context-length {context} is above SGLang's 1048576 rope rows"]
+        if refused
+        else []
+    )
 
 
 def test_the_published_draft_is_served_beside_a_built_target(monkeypatch):

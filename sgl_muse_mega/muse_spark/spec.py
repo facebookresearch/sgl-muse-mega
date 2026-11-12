@@ -94,10 +94,8 @@ def draft_reasons(path) -> list[str]:
 def config_disable_reasons(cfg, hf_config) -> list[str]:
     model = Config()
     reasons = model.hf_reasons(hf_config)
-    if cfg.context_length is None or cfg.context_length > model.context_length:
-        reasons.append(
-            f"--context-length {cfg.context_length} is unset or above {model.context_length}"
-        )
+    if cfg.context_length is None:
+        reasons.append("--context-length is unset (the rope rows bound it)")
     if cfg.tp_size != model.node_ranks * cfg.nnodes:
         reasons.append(
             f"tp_size {cfg.tp_size} over {cfg.nnodes} node(s): the kernels gather within groups of "
@@ -128,13 +126,11 @@ def model_disable_reasons(model, hf_config) -> list[str]:
     tp = get_parallel().tp_group
     cfg = Config(tp=tp.world_size)
     reasons = alias_reasons(model, cfg, tp.rank_in_group)
-    # verify_accept stages the rope rows of the next window: up to position P + 31 at a block of 16,
-    # P < --context-length
-    if (
-        not reasons
-        and rope_rows(model).shape[0] < get_model().context_length + 2 * cfg.rows
-    ):
-        reasons.append(f"the rope rows do not reach --context-length + {2 * cfg.rows}")
+    # every committed position needs SGLang's rope row (the executor continues the rows past the context)
+    if not reasons and get_model().context_length > rope_rows(model).shape[0]:
+        reasons.append(
+            f"--context-length {get_model().context_length} is above SGLang's {rope_rows(model).shape[0]} rope rows"
+        )
     hosts = [None] * tp.world_size
     dist.all_gather_object(hosts, socket.gethostname(), group=tp.cpu_group)
     if any(hosts[r] != hosts[r - r % cfg.node_ranks] for r in range(tp.world_size)):

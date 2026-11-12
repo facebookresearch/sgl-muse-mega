@@ -62,7 +62,8 @@ python -m sglang.launch_server --model-path <Muse-Spark-Open-816B-A42B-NVFP4> --
 ```
 
 TP4 on one node: `--tp-size 4 --ep-size 4` without the three multi-node flags, `--speculative-num-draft-tokens 8`,
-`--mem-fraction-static 0.95 --max-running-requests 8 --cuda-graph-max-bs-prefill 2048`.
+`--mem-fraction-static 0.95 --max-running-requests 8 --cuda-graph-max-bs-prefill 2048`. `--context-length` may reach
+SGLang's rope rows: 1048576 on this checkpoint.
 
 The first start builds the kernels (seconds, cached under `$SGLANG_CACHE_DIR/sgl_muse_mega`), and every rank logs
 `NVIDIA megakernel: active`. This plugin and sgl-nvidia-mega share SGLang's `nvidia_megakernel` name, so install one.
