@@ -340,12 +340,12 @@ def draft(rank: int, ranks: int) -> DraftWeights:
 # ---- the test setup ----
 
 
-def identity_feeds(cfg: Config, device, tree: bool = False) -> Feeds:
+def identity_feeds(cfg: Config, ctx: int, device, tree: bool = False) -> Feeds:
     """Feeds over identity tables: slots = positions in both pools, one request whose slot-table row reaches every
-    position a window can (context_length + rows), and the rope rows of position x 500000^(-2i/64) from fp64
-    (``tree``: with a token-tree window's table).
+    position a window can (ctx + rows), and the rope rows of position x 500000^(-2i/64) from fp64 (``tree``: with a
+    token-tree window's table).
     """
-    width, d = cfg.context_length + cfg.rows, cfg.head_dim
+    width, d = ctx + cfg.rows, cfg.head_dim
     inv_freq = cfg.rope_theta ** (-torch.arange(0, d, 2, dtype=torch.float64) / d)
     ang = torch.arange(width, dtype=torch.float64)[:, None] * inv_freq[None]
     return Feeds(
@@ -490,7 +490,7 @@ def context(
     draft = iteration.DraftDevice(draft_weights, weights.lm_head, cfg, rank, device)
     weights.lm_head = draft.hw[: cfg.vocab_rank]
     kv = kv_fill(cfg, rank, (max_ctx + cfg.rows + 127) // 128 * 128, device)
-    feeds = identity_feeds(cfg, device, tree)
+    feeds = identity_feeds(cfg, max_ctx, device, tree)
     stack = M8Stack(cfg, paths, libs, bufs, weights, rank, device, kv, feeds)
     share_gather_rows(bufs, consts["swa"], stack.libs8["swa"].constants)
     return iteration.Context(stack, draft, group, tree)

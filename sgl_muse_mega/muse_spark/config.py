@@ -40,7 +40,6 @@ class Config:
     output_multiplier: float = 32**-0.5
     softcap: float = 20.0
     route_scale: float = 1.0
-    context_length: int = 131072
     # the deployment: the tensor-parallel world (8, or 4 on one node)
     tp: int = 8
     # ranks per node (node-major); the pooler / unpooler gathers stay inside a node

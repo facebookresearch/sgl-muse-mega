@@ -457,7 +457,7 @@ def main() -> None:
     synthetic.seed_ids(bufs, cfg)
     weights = synthetic.model_weights(cfg, rank, device, bufs.embed_shard(cfg))
     kv = synthetic.kv_fill(cfg, rank, (args.ctx + cfg.rows + 127) // 128 * 128, device)
-    feeds = synthetic.identity_feeds(cfg, device)
+    feeds = synthetic.identity_feeds(cfg, args.ctx, device)
     synthetic.set_context(feeds, args.ctx, cfg.rows)
     if args.m8:
         bufs.ids[LIVE:] = bufs.ids[

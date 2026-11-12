@@ -511,9 +511,7 @@ def model(cfg: Config, lm_head_rows: int | None = None) -> SimpleNamespace:
             _beta=meta(1, h, dtype=torch.float32),
         )
 
-    rope = SimpleNamespace(
-        cos_sin_cache=meta(cfg.context_length + 32, 64, dtype=torch.float32)
-    )
+    rope = SimpleNamespace(cos_sin_cache=meta(1048576, 64, dtype=torch.float32))
     layers = [
         SimpleNamespace(
             input_layernorm=norm(h),
