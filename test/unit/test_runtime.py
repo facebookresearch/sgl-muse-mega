@@ -6,6 +6,7 @@ read from a checkpoint (``layer_experts``, ``sm103.weights.shard_*``).
 """
 
 import json
+import math
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -21,6 +22,7 @@ from sgl_muse_mega.muse_spark.sm103 import weights  # noqa: E402
 from sgl_muse_mega.muse_spark.sm103.dflash.head import N_WORDS, WORDS  # noqa: E402
 
 from sglang.srt.speculative.dflash_info_v2 import DFlashDraftInputV2  # noqa: E402
+from sglang.srt.speculative.spec_utils import sample_simulated_acc_len  # noqa: E402
 
 # ---- the verify's coverage ----
 
@@ -252,13 +254,12 @@ def test_without_the_target_built_every_step_is_sglangs(monkeypatch):
     assert out == "sglang"
 
 
-def test_the_export_reads_the_committed_tokens_from_the_ring():
-    """The step's tokens: the accepted drafts, then the bonus, from the out ring ending at OUT_COUNT; zeros past the
-    commit; the commit length, the bonus and the new committed length as the worker returns them.
-    """
+def export(fixed: int | None = None) -> tuple[dict, torch.Tensor]:
+    """A step's export at OUT_COUNT 18, commit 3, anchor 77, P 4099 over an out ring of 100 + row (block 8); the
+    outputs and the step words after it."""
     f = object.__new__(iteration.Fused)
     b, ring = 8, 16
-    f.b, f.cols = b, torch.arange(b)
+    f.b, f.cols, f.fixed = b, torch.arange(b), fixed
     words = torch.zeros(N_WORDS, dtype=torch.int64)
     words[WORDS["OUT_COUNT"]], words[WORDS["COMMIT"]] = 18, 3
     words[WORDS["ANCHOR"]], words[WORDS["P"]] = 77, 4099
@@ -271,6 +272,14 @@ def test_the_export_reads_the_committed_tokens_from_the_ring():
         new_seq_lens=torch.zeros(1, dtype=torch.int64),
     )
     f._export(out)
+    return out, words
+
+
+def test_the_export_reads_the_committed_tokens_from_the_ring():
+    """The step's tokens: the accepted drafts, then the bonus, from the out ring ending at OUT_COUNT; zeros past the
+    commit; the commit length, the bonus and the new committed length as the worker returns them.
+    """
+    out, _ = export()
     # OUT_COUNT 18 - commit 3 = 15: ring rows 15, 0, 1
     assert out["tokens"].tolist() == [[115, 100, 101, 0, 0, 0, 0, 0]]
     assert (out["commit"].item(), out["bonus"].item(), out["new_seq_lens"].item()) == (
@@ -278,6 +287,162 @@ def test_the_export_reads_the_committed_tokens_from_the_ring():
         77,
         4099,
     )
+
+
+def test_the_fixed_token_mode_exports_sglangs_fixed_id():
+    """SGLANG_SIMULATE_ACC_TOKEN_MODE=fixed, as SGLang's simulated step: every token and the bonus are the fixed id,
+    and the next draft starts from it; the commit and the new committed length are the step's.
+    """
+    out, words = export(fixed=100)
+    assert out["tokens"].tolist() == [[100] * 8]
+    assert (out["commit"].item(), out["bonus"].item(), out["new_seq_lens"].item()) == (
+        3,
+        100,
+        4099,
+    )
+    assert words[WORDS["ANCHOR"]].item() == 100
+
+
+def commit_lengths(length: float, method: str, b: int) -> dict[int, float]:
+    """SGLang's sample_simulated_acc_len distribution over [1, b]: {commit length: probability}."""
+    if method == "match-expected":
+        x = min(max(length, 1.0), b)
+        lo, up = math.floor(x), x - math.floor(x)
+        return {lo: 1 - up, lo + 1: up} if up else {lo: 1.0}
+    cdf = (
+        [0.0]
+        + [0.5 * math.erfc((length - k - 0.5) / math.sqrt(2)) for k in range(1, b)]
+        + [1.0]
+    )
+    return {k: cdf[k] - cdf[k - 1] for k in range(1, b + 1)}
+
+
+@pytest.mark.parametrize(
+    "length, method, b, window",
+    [
+        (5.5, "match-expected", 16, 3),
+        (3.25, "match-expected", 8, 3),
+        (6.1, "match-expected", 16, 3),
+        (8.0, "match-expected", 8, 0),
+        (20.0, "match-expected", 16, 0),
+        (0.5, "match-expected", 16, 0),
+        (5.5, "multinomial", 16, 12),
+        (2.0, "multinomial", 8, 12),
+        (7.7, "multinomial", 8, 12),
+    ],
+    ids=[
+        "half_b16",
+        "quarter_b8",
+        "tenth_b16",
+        "block_b8",
+        "past_block",
+        "under_one",
+        "multinomial_b16",
+        "multinomial_low_clamp",
+        "multinomial_high_clamp",
+    ],
+)
+def test_a_simulated_length_forces_sglangs_commit_lengths(
+    monkeypatch, length, method, b, window
+):
+    """verify_accept's forced accepts (commit - 1) follow SGLang's distribution of simulated commit lengths, the same
+    table on every rank; any run of consecutive steps (from any entry, across the wrap) totals within ``window``
+    commits of the expected."""
+    monkeypatch.setattr(iteration, "SIMULATE_ACC_LEN", length)
+    monkeypatch.setattr(iteration, "SIMULATE_ACC_METHOD", method)
+    t = iteration.simulated_accepts(b)
+    assert t.dtype == torch.int32 and t.shape == (iteration.SIMULATED_STEPS,)
+    assert torch.equal(t, iteration.simulated_accepts(b))
+    commit = t.double() + 1
+    want = commit_lengths(length, method, b)
+    assert set(commit.long().tolist()) <= set(want)
+    for k, p in want.items():
+        assert abs((commit == k).double().mean().item() - p) < 1e-3, (k, p)
+    expect = sum(k * p for k, p in want.items())
+    n = torch.arange(1, commit.numel() + 1, dtype=torch.float64)
+    for start in range(0, commit.numel(), 97):
+        run = torch.roll(commit, -start).cumsum(0)
+        assert (run - n * expect).abs().max().item() <= window + 1e-9, start
+
+
+@pytest.mark.parametrize(
+    "length, method, b",
+    [
+        (5.5, "match-expected", 16),
+        (3.25, "match-expected", 8),
+        (5.5, "multinomial", 16),
+        (2.0, "multinomial", 8),
+    ],
+)
+def test_the_tables_distribution_is_sglangs_sampler(length, method, b):
+    """The distribution the table is built to (``commit_lengths``) against SGLang's own sample_simulated_acc_len."""
+    torch.manual_seed(0)
+    draws = torch.tensor(
+        [sample_simulated_acc_len(length, method, b) for _ in range(20000)]
+    )
+    want = commit_lengths(length, method, b)
+    assert set(draws.tolist()) <= set(want)
+    for k, p in want.items():
+        assert abs((draws == k).double().mean().item() - p) < 0.015, (k, p)
+
+
+@pytest.mark.parametrize("override", [None, torch.zeros(4, dtype=torch.int32)])
+def test_a_simulated_run_continues_the_forced_accept_table(override):
+    """A request's start resets the step words from SGLang's state; with a forced-accept table the iteration word
+    (its index) carries over, so a new run does not restart the table at its first entry.
+    """
+    f = object.__new__(iteration.Fused)
+    b, ring, row = 8, 64, 4
+    words = torch.zeros(N_WORDS, dtype=torch.int64)
+    words[WORDS["ITER"]] = 37
+
+    def start(p0, commit):
+        words.zero_()
+        words[WORDS["P"]], words[WORDS["COMMIT"]] = p0, commit
+
+    rings = SimpleNamespace(
+        k_ring=torch.zeros(ring, row), v_ring=torch.zeros(ring, row)
+    )
+    f.b, f.cx = b, SimpleNamespace(ring=ring, device="cpu")
+    f.it = SimpleNamespace(
+        words=words,
+        start=start,
+        override=override,
+        dslot=torch.zeros(2 * b, dtype=torch.int32),
+        sync_state=torch.zeros(2, dtype=torch.int64),
+        lb=[rings],
+    )
+    f.r2t = torch.arange(400).view(4, 100)
+    f.draft_kv = [(torch.ones(400, row), torch.ones(400, row))]
+    b1 = SimpleNamespace(
+        seq_lens=torch.tensor([20]),
+        req_pool_indices=torch.tensor([1]),
+        spec_info=SimpleNamespace(bonus_tokens=torch.tensor([9])),
+    )
+    f._start(b1, "greedy")
+    assert words[WORDS["ITER"]].item() == (0 if override is None else 37)
+    assert (words[WORDS["P"]].item(), words[WORDS["ANCHOR"]].item()) == (20, 9)
+
+
+def test_without_a_simulated_length_the_accept_is_the_kernels(monkeypatch):
+    monkeypatch.setattr(iteration, "SIMULATE_ACC_LEN", -1.0)
+    assert iteration.simulated_accepts(16) is None and iteration.fixed_token() is None
+
+
+def test_an_unknown_simulation_method_is_refused(monkeypatch):
+    monkeypatch.setattr(iteration, "SIMULATE_ACC_LEN", 4.0)
+    monkeypatch.setattr(iteration, "SIMULATE_ACC_METHOD", "uniform")
+    with pytest.raises(ValueError, match="simulate_acc_method"):
+        iteration.simulated_accepts(16)
+
+
+@pytest.mark.parametrize("mode, token", [("fixed", 100), ("real-draft-token", None)])
+def test_the_token_mode_picks_sglangs_fixed_id_or_the_real_tokens(
+    monkeypatch, mode, token
+):
+    monkeypatch.setattr(iteration, "SIMULATE_ACC_LEN", 4.0)
+    monkeypatch.setattr(iteration, "SIMULATE_ACC_TOKEN_MODE", mode)
+    assert iteration.fixed_token() == token
 
 
 # ---- the window's slots and the KV binding ----

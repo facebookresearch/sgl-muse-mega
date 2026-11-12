@@ -17,6 +17,7 @@ from sglang.kernels.plugin_kernels.nvidia.spec import (
 )
 from sglang.srt.kernel_plugins.nvidia.binding import deadline_s
 from sglang.srt.runtime_context import get_model, get_parallel
+from sglang.srt.speculative.spec_utils import SIMULATE_ACC_LEN
 
 from ..common.jit import toolchain_reasons
 from .config import Config
@@ -41,6 +42,7 @@ SGLANG_READS = {
     "srt/runtime_context.py": ("get_model", "get_parallel", '"tp_group"'),
     "srt/distributed/parallel_state.py": ("rank_in_group", "world_size", "cpu_group"),
     "srt/environ.py": ("SGLANG_USE_HND_KVCACHE",),
+    "srt/speculative/spec_utils.py": ("SIMULATE_ACC_LEN",),
     "srt/arg_groups/fields/*.py": (
         "kv_cache_dtype",
         "speculative_algorithm",
@@ -108,6 +110,10 @@ def config_disable_reasons(cfg, hf_config) -> list[str]:
     if tree_enabled() and cfg.speculative_num_draft_tokens != model.rows:
         reasons.append(
             f"{TREE_ENV}=1: the token tree verifies a block of {model.rows} (--speculative-num-draft-tokens)"
+        )
+    if tree_enabled() and SIMULATE_ACC_LEN > 0:
+        reasons.append(
+            f"{TREE_ENV}=1 with SGLANG_SIMULATE_ACC_LEN: the token tree's forced accept names a leaf row, not a length"
         )
     if cfg.load_format == "dummy" or not (Path(cfg.model_path) / INDEX).is_file():
         reasons.append(

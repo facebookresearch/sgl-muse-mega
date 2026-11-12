@@ -37,6 +37,10 @@ same draft at the same acceptance length.
 Covers batch-1 decode, greedy or sampled; other requests fall back to SGLang. Details:
 [kernel map](sgl_muse_mega/muse_spark/sm103/kernels/README.md).
 
+SGLang's `SGLANG_SIMULATE_ACC_LEN` (with `SGLANG_SIMULATE_ACC_METHOD` and `SGLANG_SIMULATE_ACC_TOKEN_MODE`) forces the
+acceptance length of greedy fused steps as it does SGLang's own; sampled requests then run SGLang's step. Not with the
+token tree.
+
 ## Quick start
 
 Needs an SGLang with the megakernel framework, the CUDA 13.1 toolkit, 8 GB300 GPUs in one NVLink domain (or 4 on one

@@ -26,12 +26,18 @@ prefix-cache hit, or falls back to SGLang's step, drafts from the context the fu
 With the token tree on (``SGLANG_MUSE_MEGA_TREE=1``, block 16) the graph verifies a tree of drafts and moves the
 accepted path's K / V into the slots of the committed positions (and its captured rows into the draft's context) before
 the export, so SGLang receives the commit and the tokens exactly as from the linear chain.
+
+With SGLang's ``SGLANG_SIMULATE_ACC_LEN`` set (and its ``_METHOD`` / ``_TOKEN_MODE``), verify_accept forces each step's
+commit length from a table of the lengths SGLang's simulated step draws (``simulated_accepts``), and a ``fixed`` token
+mode exports SGLang's fixed token id; sampled steps then run SGLang's step, which simulates them itself.
 """
 
 from __future__ import annotations
 
 import hashlib
+import inspect
 import logging
+import math
 
 import torch
 
@@ -41,7 +47,13 @@ from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 from sglang.srt.runtime_context import get_spec
 from sglang.srt.speculative.dflash_info_v2 import DFlashDraftInputV2
+from sglang.srt.speculative.dflash_utils import apply_dflash_simulated_acceptance
 from sglang.srt.speculative.draft_worker_common import make_draft_input_v2
+from sglang.srt.speculative.spec_utils import (
+    SIMULATE_ACC_LEN,
+    SIMULATE_ACC_METHOD,
+    SIMULATE_ACC_TOKEN_MODE,
+)
 
 from ..sm103.dflash.head import WORDS
 from ..sm103.dflash.iteration import Context, Iteration
@@ -70,6 +82,18 @@ SGLANG_READS = {
         "new_seq_lens",
     ),
     "srt/speculative/dflash_info_v2.py": ("DFlashDraftInputV2", "bonus_tokens"),
+    "srt/speculative/dflash_utils.py": (
+        "apply_dflash_simulated_acceptance",
+        "apply_dflash_simulated_acceptance(fixed_token_id)",
+    ),
+    "srt/speculative/spec_utils.py": (
+        "SIMULATE_ACC_LEN",
+        "SIMULATE_ACC_METHOD",
+        "SIMULATE_ACC_TOKEN_MODE",
+        '"match-expected"',
+        '"multinomial"',
+        '"fixed"',
+    ),
     "srt/speculative/draft_worker_common.py": (
         "make_draft_input_v2",
         "make_draft_input_v2(bonus_tokens)",
@@ -121,6 +145,38 @@ SGLANG_READS = {
 
 WORKER = "sglang.srt.speculative.dflash_worker_v2.DFlashWorkerV2"
 logger = logging.getLogger(__name__)
+# verify_accept reads its forced-accept table at the iteration word mod the length
+SIMULATED_STEPS = 4096
+GOLDEN = (math.sqrt(5) - 1) / 2
+
+
+def simulated_accepts(b: int) -> torch.Tensor | None:
+    """SGLANG_SIMULATE_ACC_LEN's forced accepts (commit length - 1) for verify_accept, or None when it is off: the
+    distribution of SGLang's sample_simulated_acc_len over [1, b] at golden-ratio quantiles instead of random draws, so
+    any run of consecutive steps meets the expected total within a few commits; the same table on every rank.
+    """
+    if SIMULATE_ACC_LEN <= 0:
+        return None
+    u = torch.remainder(
+        0.5 + GOLDEN * torch.arange(SIMULATED_STEPS, dtype=torch.float64), 1.0
+    )
+    if SIMULATE_ACC_METHOD == "match-expected":
+        x = min(max(SIMULATE_ACC_LEN, 1.0), b)
+        commit = math.floor(x) + (u < x - math.floor(x)).long()
+    elif SIMULATE_ACC_METHOD == "multinomial":
+        commit = torch.round(SIMULATE_ACC_LEN + torch.special.ndtri(u)).clamp(1, b)
+    else:
+        raise ValueError(f"Invalid simulate_acc_method: {SIMULATE_ACC_METHOD}")
+    return (commit - 1).to(torch.int32)
+
+
+def fixed_token() -> int | None:
+    """The token id SGLang's simulated step commits in the "fixed" token mode (SGLang's DFlash2 worker checked the mode
+    at its start), or None (real tokens)."""
+    if SIMULATE_ACC_LEN <= 0 or SIMULATE_ACC_TOKEN_MODE != "fixed":
+        return None
+    sig = inspect.signature(apply_dflash_simulated_acceptance)
+    return sig.parameters["fixed_token_id"].default
 
 
 def _seed(req) -> int:
@@ -150,16 +206,19 @@ def _plain(batch) -> bool:
 
 class Fused:
     """One process's fused iteration of the target's block size: the greedy graph, the sampled graph (not with the
-    token tree) and the flush graph (the draft alone, then the pool copy of the run's last commit).
+    token tree or a simulated accept length) and the flush graph (the draft alone, then the pool copy of the run's last
+    commit).
     """
 
     def __init__(self, target: Verify, draft_model, draft_kv_pool):
         cx = Context(target.stack, target.draft, target.group, tree=target.tree)
         self.cx, self.b, self.f = cx, target.block, target.stack.f
-        self.sample = not target.tree
+        self.sample = not target.tree and SIMULATE_ACC_LEN <= 0
+        self.fixed = fixed_token()
         self.it = it = Iteration(
             self.b,
             cx,
+            override=simulated_accepts(self.b),
             tree=target.tree,
             sample=self.sample,
             block=bool(get_spec().speculative_use_block_verification),
@@ -198,7 +257,7 @@ class Fused:
         # the run's last commit is not in SGLang's draft pool yet
         self.pending = False
         logger.info(
-            "fused DFlash2 iteration: block %d%s, %d launches in one graph%s, through %s",
+            "fused DFlash2 iteration: block %d%s, %d launches in one graph%s, through %s%s",
             self.b,
             " (token tree)" if target.tree else "",
             len(it.launches("iter")) + 2,
@@ -208,6 +267,12 @@ class Fused:
                 else ""
             ),
             "SGLang's iteration slot" if SLOT else "hooks",
+            (
+                f"; simulated accept length {SIMULATE_ACC_LEN:g} ({SIMULATE_ACC_METHOD}, "
+                f"{SIMULATE_ACC_TOKEN_MODE} tokens; sampled steps run SGLang's)"
+                if SIMULATE_ACC_LEN > 0
+                else ""
+            ),
         )
 
     def _outputs(self) -> dict:
@@ -221,11 +286,19 @@ class Fused:
 
     def _export(self, out: dict) -> None:
         """The step's results in the worker's form: the committed tokens (the accepted drafts, then the bonus; zeros
-        past the commit), the commit length, the bonus and the new committed length."""
+        past the commit), the commit length, the bonus and the new committed length. In the fixed token mode, as
+        SGLang's simulated step: every token and the bonus are the fixed id, which the next draft also starts from.
+        """
         w, ring = self.it.words, self.it.accept_buf.out_ring
         commit = w[WORDS["COMMIT"]]
-        idx = torch.remainder(w[WORDS["OUT_COUNT"]] - commit + self.cols, ring.shape[0])
-        out["tokens"][0].copy_(torch.where(self.cols < commit, ring[idx].long(), 0))
+        if self.fixed is None:
+            idx = torch.remainder(
+                w[WORDS["OUT_COUNT"]] - commit + self.cols, ring.shape[0]
+            )
+            out["tokens"][0].copy_(torch.where(self.cols < commit, ring[idx].long(), 0))
+        else:
+            w[WORDS["ANCHOR"]].fill_(self.fixed)
+            out["tokens"].fill_(self.fixed)
         out["commit"].copy_(commit)
         out["bonus"].copy_(w[WORDS["ANCHOR"]])
         out["new_seq_lens"].copy_(w[WORDS["P"]])
@@ -288,7 +361,11 @@ class Fused:
         """
         it, cx, b = self.it, self.cx, self.b
         p0 = int(batch.seq_lens[0])
+        # the forced-accept table continues across runs instead of restarting at its first entry
+        steps = None if it.override is None else it.words[WORDS["ITER"]].clone()
         it.start(p0, 1)
+        if steps is not None:
+            it.words[WORDS["ITER"]].copy_(steps)
         it.words[WORDS["ANCHOR"]].copy_(batch.spec_info.bonus_tokens[0])
         it.dslot[b].fill_(-1)
         it.sync_state[0].fill_(p0)
