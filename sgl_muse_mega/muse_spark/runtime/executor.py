@@ -15,10 +15,12 @@ from sglang.kernels.plugin_kernels.nvidia.spec import BuiltMegakernel, Step
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.model_executor.forward_context import get_req_to_token_pool
 from sglang.srt.model_executor.runner import get_is_capture_mode
+from sglang.srt.runtime_context import get_model
 
 from ..config import Config
 from ..sm103.buffers import Buffers, Feeds
 from ..sm103.dflash.iteration import DraftDevice, capture_layers
+from ..sm103.dflash.weights import rope_cos_sin
 from ..sm103.verify import M8Stack, Stack, Window
 from ..sm103.weights import ModelWeights
 
@@ -58,6 +60,8 @@ SGLANG_READS = {
     "srt/layers/rotary_embedding/base.py": ("cos_sin_cache",),
     # Muse Spark's prefill calls its forward again with input_ids None (plan declines it)
     "srt/managers/mm_utils.py": ("general_mm_embed_routine",),
+    "srt/runtime_context.py": ("get_model",),
+    "srt/arg_groups/fields/*.py": ("context_length",),
 }
 # SGLang's megakernel contract has the DFlash iteration slot (and the pool view's layer buffers); an SGLang without
 # it gets the fused iteration through hooks on its DFlash2 worker (runtime.iteration.install)
@@ -67,6 +71,18 @@ SLOT = "dflash_iteration" in BuiltMegakernel.__annotations__
 def rope_rows(model) -> torch.Tensor:
     """SGLang's fp32 rope rows {cos | sin} per position (a sliding layer's: the global layers have none)."""
     return model.model.language_model.layers[0].self_attn.rotary_emb.cos_sin_cache
+
+
+def rope_table(rows: torch.Tensor, need: int, cfg: Config) -> torch.Tensor:
+    """SGLang's rope rows, continued to ``need`` rows as SGLang computes them where they end sooner: verify_accept
+    stages rows up to P + 31 (< --context-length + 32), and rows past the context reach no committed token.
+    """
+    if rows.shape[0] >= need:
+        return rows
+    cos, sin = rope_cos_sin(
+        torch.arange(rows.shape[0], need), cfg.head_dim, cfg.rope_theta
+    )
+    return torch.cat([rows, torch.cat([cos, sin], 1).to(rows.device)])
 
 
 def window_slots(
@@ -169,7 +185,9 @@ class Verify:
             cfg,
             get_req_to_token_pool().req_to_token,
             pool.full_to_swa_index_mapping,
-            rope_rows(self.model),
+            rope_table(
+                rope_rows(self.model), get_model().context_length + 2 * cfg.rows, cfg
+            ),
             self.device,
             tree=self.tree,
         )

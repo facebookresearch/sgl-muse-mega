@@ -553,6 +553,18 @@ def model(cfg: Config, lm_head_rows: int | None = None) -> SimpleNamespace:
     )
 
 
+def test_the_rope_rows_continue_past_sglangs():
+    cfg = Config()
+    n, need = 4096, 4096 + 2 * cfg.rows
+    cos, sin = executor.rope_cos_sin(torch.arange(need), cfg.head_dim, cfg.rope_theta)
+    full = torch.cat([cos, sin], 1)
+    rows = full[:n].clone()
+    assert executor.rope_table(rows, n, cfg) is rows
+    out = executor.rope_table(rows, need, cfg)
+    assert out.shape == full.shape and torch.equal(out[:n], rows)
+    torch.testing.assert_close(out, full, rtol=0, atol=1e-6)
+
+
 @pytest.mark.parametrize("tp", [4, 8])
 def test_sglangs_tensors_alias_in_place(tp):
     cfg = Config(tp=tp)

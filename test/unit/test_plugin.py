@@ -276,7 +276,7 @@ def draft_config(**dflash) -> SimpleNamespace:
 
 
 @pytest.mark.parametrize(
-    "context, refused", [(131072, False), (1048544, False), (1048545, True)]
+    "context, refused", [(131072, False), (1048576, False), (1048577, True)]
 )
 def test_the_rope_rows_bound_the_context(monkeypatch, context, refused):
     # SGLang's rope rows for the published checkpoint: its max_position_embeddings
@@ -296,9 +296,7 @@ def test_the_rope_rows_bound_the_context(monkeypatch, context, refused):
     )
     reasons = spec.model_disable_reasons(None, None)
     assert reasons == (
-        [
-            f"--context-length {context} is above 1048544: the rope rows reach 1048544 + 32"
-        ]
+        [f"--context-length {context} is above SGLang's 1048576 rope rows"]
         if refused
         else []
     )

@@ -126,15 +126,11 @@ def model_disable_reasons(model, hf_config) -> list[str]:
     tp = get_parallel().tp_group
     cfg = Config(tp=tp.world_size)
     reasons = alias_reasons(model, cfg, tp.rank_in_group)
-    # verify_accept stages the rope rows of the next window: up to position P + 31 at a block of 16,
-    # P < --context-length
-    if not reasons:
-        longest = rope_rows(model).shape[0] - 2 * cfg.rows
-        if get_model().context_length > longest:
-            reasons.append(
-                f"--context-length {get_model().context_length} is above {longest}: "
-                f"the rope rows reach {longest} + {2 * cfg.rows}"
-            )
+    # every committed position needs SGLang's rope row (the executor continues the rows past the context)
+    if not reasons and get_model().context_length > rope_rows(model).shape[0]:
+        reasons.append(
+            f"--context-length {get_model().context_length} is above SGLang's {rope_rows(model).shape[0]} rope rows"
+        )
     hosts = [None] * tp.world_size
     dist.all_gather_object(hosts, socket.gethostname(), group=tp.cpu_group)
     if any(hosts[r] != hosts[r - r % cfg.node_ranks] for r in range(tp.world_size)):
