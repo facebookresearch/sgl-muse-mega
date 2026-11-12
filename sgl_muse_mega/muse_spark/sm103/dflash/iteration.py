@@ -284,10 +284,10 @@ class Iteration:
     """Block size B on one rank: the draft's state, its launches (``draft``), the verify with verify_accept
     (``verify``) and the run state (``start``; ``reset`` between the tests' runs). ``override`` (int32 [n];
     verify_accept's one test hook, for the tests and the benchmark on synthetic target weights, which never accept on
-    their own; a server passes none): verify_accept takes the accept from it, indexed by the iteration word mod n,
-    instead of the greedy prefix rule (on a tree, the accepted leaf row). ``tree``: the token-tree iteration (block 16,
-    the Context's tree images). ``sample``: also the sampled step's launches (a linear chain; ``block``: SGLang's block
-    verification, else token-wise).
+    their own; a server passes one only for SGLANG_SIMULATE_ACC_LEN): verify_accept takes the accept from it, indexed by
+    the iteration word mod n, instead of the greedy prefix rule (on a tree, the accepted leaf row). ``tree``: the
+    token-tree iteration (block 16, the Context's tree images). ``sample``: also the sampled step's launches (a linear
+    chain; ``block``: SGLang's block verification, else token-wise).
     """
 
     def __init__(

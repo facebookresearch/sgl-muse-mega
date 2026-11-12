@@ -140,9 +140,10 @@ the draft block B is a compile pin. The draft's kernels are `draft_<unit>` (and 
 | `verify_accept_sample` | `verify_accept.cu` | `sample_accept` (`-DMK_DFLASH_SAMPLE=1`), after the verify graph's lm_head and softcap: per live row a cluster holds the row's scaled logits (a column slice per CTA) and computes its max, the exact top-k and top-p thresholds (radix selection: counts, then masses in 2^-40 fixed point), the normalizer, its candidates' probabilities and per-chunk masses; the last CTA runs the chain's accept (block or token-wise), samples the bonus (chunk masses, then one chunk's elements) and writes verify_accept's commit and feeds | 8 CTAs per live row in clusters of 8, 256 threads, PDL |
 | `kv_sync` | `kv_sync.cu` | `draft_kv_sync`: copies the ring rows of the positions committed since the last copy into SGLang's draft KV pool at their slots (an iteration's last launch; or after the draft alone, for a request's last commit) | grid 1, 256 threads, PDL |
 
-`verify_accept`'s `accept_override` is the one test hook in a shipping image: a table of forced accepts, one per
-iteration, so the GPU tests on synthetic target weights (which never accept a draft on their own) drive every accept
-length through the shipped `verify_accept` binary; the server binds it null.
+`verify_accept`'s `accept_override` is a table of forced accepts, one per iteration: the GPU tests on synthetic target
+weights (which never accept a draft on their own) drive every accept length through the shipped `verify_accept` binary
+with it, and the server binds it only for SGLang's `SGLANG_SIMULATE_ACC_LEN` (`runtime/iteration.py`
+`simulated_accepts`), else null.
 
 The token tree (`-DMK_DFLASH_TREE=1`, block 16, `dflash/tree.cuh`) builds tree images of `draft_head`, `verify_accept` and the
 four layer images, bound through the same host libraries. The head keeps each lattice row's top 4 with their softmax

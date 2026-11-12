@@ -199,6 +199,21 @@ def test_refusals_name_the_reason(tmp_path, monkeypatch, text, args, reason):
     assert any(reason in r for r in reasons), reasons
 
 
+@pytest.mark.parametrize(
+    "tree, length, refused", [("1", 4.0, True), ("1", -1.0, False), ("0", 4.0, False)]
+)
+def test_the_token_tree_refuses_a_simulated_length(
+    tmp_path, monkeypatch, tree, length, refused
+):
+    """The tree's forced accept names a leaf row, which forces no length: the megakernel refuses the pair."""
+    monkeypatch.setattr(spec, "toolchain_reasons", lambda: [])
+    monkeypatch.setattr(spec, "SIMULATE_ACC_LEN", length)
+    monkeypatch.setenv(spec.TREE_ENV, tree)
+    cfg = server(tmp_path, speculative_num_draft_tokens=16)
+    reasons = spec.config_disable_reasons(cfg, muse_config())
+    assert any("SGLANG_SIMULATE_ACC_LEN" in r for r in reasons) == refused, reasons
+
+
 def test_another_draft_architecture_is_refused_before_the_build(tmp_path, monkeypatch):
     """The fused iteration needs the DFlash2 draft's spec: any other draft is refused at resolution, before the
     expert copy (SGLang's v1 DFlash draft, a hub id, a sharded draft)."""

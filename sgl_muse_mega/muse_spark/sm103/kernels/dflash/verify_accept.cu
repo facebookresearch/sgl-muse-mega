@@ -19,7 +19,7 @@ struct AcceptArgs {
     const int64_t* tokens;           // [b_live] the verified window [anchor, d_1 .. d_(b_live - 1)]
     int64_t* words;                  // the step words (kWord*)
     int32_t* top1;                   // [16] each live row's argmax
-    const int32_t* accept_override;  // [n_override] a forced accept per iteration (tests on synthetic weights), or null
+    const int32_t* accept_override;  // [n_override] a forced accept per iteration (tests, simulated accept), or null
     int32_t* out_ring;               // [ring] committed tokens
     const float* cos_sin_cache;      // target rope rows [cos_sin_rows][d]
     float* cos_sin;                  // [16][d]
